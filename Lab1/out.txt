@@ -1,0 +1,2 @@
+Triangle area: 2
+Quadrilateral area: 4
