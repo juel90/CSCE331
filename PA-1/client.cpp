@@ -23,6 +23,9 @@ int main(int argc, char *argv[])
 	double t = 0.0;
 	int e = 1;
 
+	// start server and pass flags
+	char *cmd1[] = {(char *)"./server", nullptr};
+
 	pid_t child = fork();
 	if (child == -1)
 	{
@@ -32,12 +35,13 @@ int main(int argc, char *argv[])
 	if (child == 0)
 	{
 		// In child, start the server
-		execlp("./server", NULL);
+		execvp(cmd1[0], cmd1);
 		return 0;
 	}
 
 	string filename = "";
-	while ((opt = getopt(argc, argv, "p:t:e:f:")) != -1)
+	bool newChannel = false;
+	while ((opt = getopt(argc, argv, "p:t:e:f:c")) != -1)
 	{
 		switch (opt)
 		{
@@ -53,88 +57,145 @@ int main(int argc, char *argv[])
 		case 'f':
 			filename = optarg;
 			break;
+		case 'c':
+			newChannel = true;
+			break;
 		}
 	}
 
-	FIFORequestChannel chan("control", FIFORequestChannel::CLIENT_SIDE);
+	FIFORequestChannel *controlChannel = new FIFORequestChannel("control", FIFORequestChannel::CLIENT_SIDE);
+	FIFORequestChannel *chan = controlChannel;
 
-	// example data point request
+	if (newChannel)
+	{
+		MESSAGE_TYPE m = NEWCHANNEL_MSG;
+		controlChannel->cwrite(&m, sizeof(MESSAGE_TYPE));
+		char reply[30];
+		controlChannel->cread(&reply, sizeof(reply));
+		FIFORequestChannel *newFIFOChannel = new FIFORequestChannel(reply, FIFORequestChannel::CLIENT_SIDE);
+		chan = newFIFOChannel;
+	}
+
+	// initial data point request
 	char buf[MAX_MESSAGE]; // 256
 	datamsg x(p, t, e);
 
 	memcpy(buf, &x, sizeof(datamsg));
-	chan.cwrite(buf, sizeof(datamsg)); // question
+	chan->cwrite(buf, sizeof(datamsg)); // question
 	double reply;
-	chan.cread(&reply, sizeof(double)); // answer
+	chan->cread(&reply, sizeof(double)); // answer
 	cout << "For person " << p << ", at time " << t << ", the value of ecg " << e << " is " << reply << endl;
 
-	// sending a request for full file size
-	filemsg fm(0, 0);
+	// Initialize ostringstream
 	ostringstream oss;
-	oss << p << ".csv";
-	string fname = oss.str();
 
-	int len = sizeof(filemsg) + (fname.size() + 1);
-	char *buf2 = new char[len];
-	memcpy(buf2, &fm, sizeof(filemsg));
-	strcpy(buf2 + sizeof(filemsg), fname.c_str());
-	chan.cwrite(buf2, len); // I want the file length;
-
-	delete[] buf2;
-
-	// Read full file size
-	__int64_t fileSizeLeft;
-	chan.cread(&fileSizeLeft, sizeof(__int64_t));
-
-	// Open new file
-	oss.clear();
-	oss << "x" << fname;
-	string outputName = oss.str();
-	FILE *file = fopen(outputName.c_str(), "wb");
-
-	if (file == nullptr)
+	if (t == 0)
 	{
-		perror("Error opening file");
-		return 1;
+		double pointCount = 0;
+
+		string outputName = "received/x1.csv";
+
+		FILE *file = fopen(outputName.c_str(), "w");
+		if (file == nullptr)
+		{
+			throw runtime_error("Failed to open output file");
+		}
+
+		for (size_t i = 0; i < 1000; i++)
+		{
+			datamsg newPts(p, pointCount, 1);
+			memcpy(buf, &newPts, sizeof(datamsg));
+			chan->cwrite(buf, sizeof(datamsg));
+			double ecg1;
+			chan->cread(&ecg1, sizeof(double));
+
+			datamsg newPts2(p, pointCount, 2);
+			memcpy(buf, &newPts2, sizeof(datamsg));
+			chan->cwrite(buf, sizeof(datamsg));
+			double ecg2;
+			chan->cread(&ecg2, sizeof(double));
+
+			oss.str("");
+			oss << pointCount << "," << ecg1 << "," << ecg2;
+
+			fwrite(oss.str().c_str(), sizeof(char), strlen(oss.str().c_str()), file);
+			fwrite("\n", sizeof(char), 1, file);
+			pointCount += 0.004;
+		}
+		fclose(file);
 	}
 
-	cout << " Full size is " << fileSizeLeft << " bytes" << endl;
-	int offsetCount = 0;
-	while (fileSizeLeft > 0)
+	// sending a request for full file size
+	if (filename != "")
 	{
-		int requestSize;
+		filemsg fm(0, 0);
 
-		if (fileSizeLeft > MAX_MESSAGE)
-		{
-			fileSizeLeft -= MAX_MESSAGE;
-			requestSize = MAX_MESSAGE;
-		}
-		else
-		{
-			requestSize = fileSizeLeft;
-			fileSizeLeft = 0;
-		}
-
-		// Send request for binary data
-		cout << "Offset is " << MAX_MESSAGE * offsetCount << " bytes, requesting " << requestSize << " bytes.";
-		filemsg fileMessage(MAX_MESSAGE * offsetCount, requestSize);
+		int len = sizeof(filemsg) + (filename.size() + 1);
 		char *buf2 = new char[len];
-		memcpy(buf2, &fileMessage, sizeof(filemsg));
-		strcpy(buf2 + sizeof(filemsg), fname.c_str());
-		chan.cwrite(buf2, len); // I want some binary data;
+		memcpy(buf2, &fm, sizeof(filemsg));
+		strcpy(buf2 + sizeof(filemsg), filename.c_str());
+		chan->cwrite(buf2, len); // I want the file length;
 
 		delete[] buf2;
-		offsetCount++;
 
-		// Receieve binary data from server
-		__int64_t binaryData;
-		chan.cread(&binaryData, sizeof(__int64_t));
-		cout << "Received data " << binaryData << endl;
+		// Read full file size
+		__int64_t fileSizeLeft;
+		chan->cread(&fileSizeLeft, sizeof(__int64_t));
+
+		// Open new file
+		oss.str("");
+		oss << "received/" << filename;
+		string outputName = oss.str();
+
+		ofstream ofs(outputName, ios::binary);
+		if (!ofs.is_open())
+		{
+			throw runtime_error("Failed to open output file");
+		}
+
+		int offsetCount = 0;
+		while (fileSizeLeft > 0)
+		{
+			int requestSize;
+
+			if (fileSizeLeft > MAX_MESSAGE)
+			{
+				fileSizeLeft -= MAX_MESSAGE;
+				requestSize = MAX_MESSAGE;
+			}
+			else
+			{
+				requestSize = fileSizeLeft;
+				fileSizeLeft = 0;
+			}
+
+			// Send request for binary data
+			filemsg fileMessage(MAX_MESSAGE * offsetCount, requestSize);
+			char *buf2 = new char[len];
+			memcpy(buf2, &fileMessage, sizeof(filemsg));
+			strcpy(buf2 + sizeof(filemsg), filename.c_str());
+			chan->cwrite(buf2, len); // I want some binary data;
+
+			delete[] buf2;
+			offsetCount++;
+
+			// Receieve binary data from server
+			vector<char> binaryData(fileMessage.length);
+			int count = chan->cread(binaryData.data(), fileMessage.length);
+			ofs.write(binaryData.data(), count);
+		}
+
+		ofs.close();
 	}
-
-	fclose(file);
 
 	// closing the channel
 	MESSAGE_TYPE m = QUIT_MSG;
-	chan.cwrite(&m, sizeof(MESSAGE_TYPE));
+	chan->cwrite(&m, sizeof(MESSAGE_TYPE));
+	delete chan;
+
+	if (newChannel)
+	{
+		controlChannel->cwrite(&m, sizeof(MESSAGE_TYPE));
+		delete controlChannel;
+	}
 }
