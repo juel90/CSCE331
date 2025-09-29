@@ -23,25 +23,10 @@ int main(int argc, char *argv[])
 	double t = 0.0;
 	int e = 1;
 
-	// start server and pass flags
-	char *cmd1[] = {(char *)"./server", nullptr};
-
-	pid_t child = fork();
-	if (child == -1)
-	{
-		return 1;
-	}
-
-	if (child == 0)
-	{
-		// In child, start the server
-		execvp(cmd1[0], cmd1);
-		return 0;
-	}
-
 	string filename = "";
+	int maxMsg = MAX_MESSAGE;
 	bool newChannel = false;
-	while ((opt = getopt(argc, argv, "p:t:e:f:c")) != -1)
+	while ((opt = getopt(argc, argv, "p:t:e:f:m:c")) != -1)
 	{
 		switch (opt)
 		{
@@ -57,10 +42,31 @@ int main(int argc, char *argv[])
 		case 'f':
 			filename = optarg;
 			break;
+		case 'm':
+			maxMsg = atoi(optarg);
+			break;
 		case 'c':
 			newChannel = true;
 			break;
 		}
+	}
+
+	// start server and pass flags
+	char mstr[32];
+	snprintf(mstr, sizeof(mstr), "%d", maxMsg);
+	char *cmd1[] = {(char *)"./server", (char *)"-m", mstr, nullptr};
+
+	pid_t child = fork();
+	if (child == -1)
+	{
+		return 1;
+	}
+
+	if (child == 0)
+	{
+		// In child, start the server
+		execvp(cmd1[0], cmd1);
+		return 0;
 	}
 
 	FIFORequestChannel *controlChannel = new FIFORequestChannel("control", FIFORequestChannel::CLIENT_SIDE);
@@ -77,11 +83,12 @@ int main(int argc, char *argv[])
 	}
 
 	// initial data point request
-	char buf[MAX_MESSAGE]; // 256
+	// char buf[maxMsg]; // 256
+	vector<char> buf(maxMsg);
 	datamsg x(p, t, e);
 
-	memcpy(buf, &x, sizeof(datamsg));
-	chan->cwrite(buf, sizeof(datamsg)); // question
+	memcpy(buf.data(), &x, sizeof(datamsg));
+	chan->cwrite(buf.data(), sizeof(datamsg)); // question
 	double reply;
 	chan->cread(&reply, sizeof(double)); // answer
 	cout << "For person " << p << ", at time " << t << ", the value of ecg " << e << " is " << reply << endl;
@@ -104,14 +111,14 @@ int main(int argc, char *argv[])
 		for (size_t i = 0; i < 1000; i++)
 		{
 			datamsg newPts(p, pointCount, 1);
-			memcpy(buf, &newPts, sizeof(datamsg));
-			chan->cwrite(buf, sizeof(datamsg));
+			memcpy(buf.data(), &newPts, sizeof(datamsg));
+			chan->cwrite(buf.data(), sizeof(datamsg));
 			double ecg1;
 			chan->cread(&ecg1, sizeof(double));
 
 			datamsg newPts2(p, pointCount, 2);
-			memcpy(buf, &newPts2, sizeof(datamsg));
-			chan->cwrite(buf, sizeof(datamsg));
+			memcpy(buf.data(), &newPts2, sizeof(datamsg));
+			chan->cwrite(buf.data(), sizeof(datamsg));
 			double ecg2;
 			chan->cread(&ecg2, sizeof(double));
 
@@ -158,10 +165,10 @@ int main(int argc, char *argv[])
 		{
 			int requestSize;
 
-			if (fileSizeLeft > MAX_MESSAGE)
+			if (fileSizeLeft > maxMsg)
 			{
-				fileSizeLeft -= MAX_MESSAGE;
-				requestSize = MAX_MESSAGE;
+				fileSizeLeft -= maxMsg;
+				requestSize = maxMsg;
 			}
 			else
 			{
@@ -170,7 +177,7 @@ int main(int argc, char *argv[])
 			}
 
 			// Send request for binary data
-			filemsg fileMessage(MAX_MESSAGE * offsetCount, requestSize);
+			filemsg fileMessage(maxMsg * offsetCount, requestSize);
 			char *buf2 = new char[len];
 			memcpy(buf2, &fileMessage, sizeof(filemsg));
 			strcpy(buf2 + sizeof(filemsg), filename.c_str());
